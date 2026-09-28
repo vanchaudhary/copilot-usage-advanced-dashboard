@@ -1,4 +1,6 @@
 import json
+import csv
+import io
 import requests
 import os
 import hashlib
@@ -7,7 +9,7 @@ from elasticsearch import Elasticsearch, NotFoundError
 from datetime import datetime, timedelta
 from log_utils import configure_logger, current_time
 import time
-from metrics_2_usage_convertor import convert_metrics_to_usage
+from metrics_2_usage_convertor import convert_user_report_to_usage
 import traceback
 from zoneinfo import ZoneInfo
 from create_user_summary import create_user_summaries
@@ -121,6 +123,7 @@ class Indexes:
     )
     index_user_metrics = os.getenv("INDEX_USER_METRICS", "copilot_user_metrics")
     index_user_adoption = os.getenv("INDEX_USER_ADOPTION", "copilot_user_adoption")
+    index_ai_billing = os.getenv("INDEX_AI_BILLING", "copilot_ai_billing")
 
 
 logger = configure_logger(log_path=Paras.log_path)
@@ -137,12 +140,12 @@ if not Paras.organization_slugs:
     exit(1)
 
 
-def github_api_request_handler(url, error_return_value=[]):
+def github_api_request_handler(url, error_return_value=[], api_version="2022-11-28"):
     logger.info(f"Requesting URL: {url}")
     headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {Paras.github_pat}",
-        "X-GitHub-Api-Version": "2022-11-28",
+        "X-GitHub-Api-Version": api_version,
     }
     
     try:
@@ -590,99 +593,12 @@ class GitHubOrganizationManager:
         self.slug_type = "Standalone" if is_standalone else "Organization"
         self.api_type = "enterprises" if is_standalone else "orgs"
         self.organization_slug = organization_slug
+        self.user_team_lookup = {}
         self.teams = self._fetch_all_teams(save_to_json=save_to_json)
         self.utc_offset = get_utc_offset()
         logger.info(
             f"Initialized GitHubOrganizationManager for {self.slug_type}: {organization_slug}"
         )
-
-    def get_copilot_usages(
-        self,
-        team_slug="all",
-        save_to_json=True,
-        position_in_tree="leaf_team",
-        usage_or_metrics="metrics",
-    ):
-        urls = {
-            self.organization_slug,
-            (
-                position_in_tree,
-                f"https://api.github.com/{self.api_type}/{self.organization_slug}/copilot/{usage_or_metrics}",
-            ),
-        }
-        if team_slug:
-            if team_slug != "all":
-                urls = {
-                    team_slug: (
-                        position_in_tree,
-                        f"https://api.github.com/{self.api_type}/{self.organization_slug}/team/{team_slug}/copilot/{usage_or_metrics}",
-                    )
-                }
-            else:
-                if self.teams:
-                    logger.info(
-                        f"Fetching Copilot usages for all teams, team count: {len(self.teams)}"
-                    )
-                    urls = {
-                        team["slug"]: (
-                            team["position_in_tree"],
-                            f"https://api.github.com/{self.api_type}/{self.organization_slug}/team/{team['slug']}/copilot/{usage_or_metrics}",
-                        )
-                        for team in self.teams
-                    }
-
-                    # add root team in case teams are too small
-                    urls.update(
-                        {
-                            "no-team": (
-                                "root_team",
-                                f"https://api.github.com/{self.api_type}/{self.organization_slug}/copilot/{usage_or_metrics}",
-                            )
-                        }
-                    )
-                else:
-                    logger.info(
-                        f"No teams found for {self.slug_type}: {self.organization_slug}, fetching {self.slug_type} usage. mock team slug: no-team. strongly recommend to create teams for the {self.slug_type} to get more accurate data."
-                    )
-                    urls = {
-                        "no-team": (
-                            "root_team",
-                            f"https://api.github.com/{self.api_type}/{self.organization_slug}/copilot/{usage_or_metrics}",
-                        )
-                    }
-
-        datas = {}
-        logger.info(
-            f"Fetching Copilot usages for {self.slug_type}: {self.organization_slug}, team: {team_slug}"
-        )
-        for _team_slug, position_in_tree_and_url in urls.items():
-            position_in_tree, url = position_in_tree_and_url
-            data = github_api_request_handler(url, error_return_value={})
-            dict_save_to_json_file(
-                data,
-                f"{self.organization_slug}_{_team_slug}_copilot_metrics",
-                save_to_json=save_to_json,
-            )
-            data = convert_metrics_to_usage(data)
-            dict_save_to_json_file(
-                data,
-                f"{self.organization_slug}_{_team_slug}_copilot_usage",
-                save_to_json=save_to_json,
-            )
-            datas[_team_slug] = {
-                "position_in_tree": position_in_tree,
-                "copilot_usage_data": data,
-            }
-            logger.info(f"Fetched Copilot usage for team: {_team_slug}")
-
-        if team_slug == "all":
-            dict_save_to_json_file(
-                datas,
-                f"{self.organization_slug}_all_teams_copilot_usage",
-                save_to_json=save_to_json,
-            )
-
-        return datas
 
     def get_seat_info_settings_standalone(self, save_to_json=True):
         # only for Standalone
@@ -893,6 +809,14 @@ class GitHubOrganizationManager:
         )
         return datas
 
+    @staticmethod
+    def build_user_team_lookup(seat_assignments):
+        return {
+            seat.get("assignee_login"): seat.get("assignee_team_slug", "no-team")
+            for seat in seat_assignments
+            if seat.get("assignee_login")
+        }
+
     def _fetch_all_teams(self, save_to_json=True):
         # Teams under the same org are essentially at the same level because the URL does not reflect the nested relationship, so team names cannot be duplicated
 
@@ -954,6 +878,9 @@ class GitHubOrganizationManager:
 
                         rec["organization_slug"] = self.organization_slug
                         rec["slug_type"] = self.slug_type
+                        rec["team_slug"] = self.user_team_lookup.get(
+                            rec.get("user_login"), "no-team"
+                        )
                         rec["last_updated_at"] = current_time()
                         rec["utc_offset"] = self.utc_offset
 
@@ -989,7 +916,9 @@ class GitHubOrganizationManager:
         url = f"https://api.github.com/{self.api_type}/{self.organization_slug}/copilot/metrics/reports/users-28-day/latest"
         
         logger.info(f"Fetching user metrics download links from: {url}")
-        api_response = github_api_request_handler(url, error_return_value={})
+        api_response = github_api_request_handler(
+            url, error_return_value={}, api_version="2026-03-10"
+        )
         
         if not api_response or 'download_links' not in api_response:
             logger.warning("No download links received from user metrics API")
@@ -1103,6 +1032,7 @@ class GitHubOrganizationManager:
                             **user_data,
                             **top_values,  # Add calculated top values
                             'organization_slug': self.organization_slug,
+                            'team_slug': self.user_team_lookup.get(user_data.get('user_login'), 'no-team'),
                             'slug_type': self.slug_type,
                             'last_updated_at': current_time_str,
                             'utc_offset': self.utc_offset,
@@ -1139,6 +1069,225 @@ class GitHubOrganizationManager:
         
         logger.info(f"Processed {len(processed_data)} total user metrics records for {self.slug_type}: {self.organization_slug}")
         return processed_data
+
+    def get_ai_billing_report(self, report_id=None, save_to_json=True):
+        if not self.api_type == "enterprises":
+            return []
+
+        if not report_id:
+            start_date = os.getenv("GITHUB_BILLING_START_DATE")
+            end_date = os.getenv("GITHUB_BILLING_END_DATE")
+            if not start_date or not end_date:
+                today = datetime.utcnow().date()
+                first_of_month = today.replace(day=1)
+                end_date = (first_of_month - timedelta(days=1)).isoformat()
+                start_date = end_date[:8] + "01"
+            create_url = (
+                f"https://api.github.com/enterprises/{self.organization_slug}"
+                "/settings/billing/reports"
+            )
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {Paras.github_pat}",
+                "X-GitHub-Api-Version": "2026-03-10",
+                "User-Agent": "copilot-usage-report",
+                "Content-Type": "application/json",
+            }
+            response = requests.post(
+                create_url,
+                headers=headers,
+                json={"report_type": "ai_credit", "start_date": start_date, "end_date": end_date},
+                timeout=60,
+            )
+            if response.status_code == 409:
+                list_response = requests.get(create_url, headers=headers, timeout=60)
+                list_response.raise_for_status()
+                exports = list_response.json().get("usage_report_exports", [])
+                candidates = [
+                    export for export in exports
+                    if export.get("report_type") == "ai_credit"
+                    and export.get("status") in ("processing", "completed")
+                ]
+                candidates.sort(
+                    key=lambda export: (
+                        export.get("status") == "completed",
+                        export.get("created_at", ""),
+                    ),
+                    reverse=True,
+                )
+                report_id = candidates[0].get("id") if candidates else None
+            else:
+                response.raise_for_status()
+                report_id = response.json().get("id")
+            if not report_id:
+                logger.warning("AI billing report creation returned no report ID")
+                return []
+
+        url = (
+            f"https://api.github.com/enterprises/{self.organization_slug}"
+            f"/settings/billing/reports/{report_id}"
+        )
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {Paras.github_pat}",
+            "X-GitHub-Api-Version": "2026-03-10",
+            "User-Agent": "copilot-usage-report",
+        }
+        report = {}
+        for _ in range(12):
+            response = requests.get(url, headers=headers, timeout=60)
+            response.raise_for_status()
+            report = response.json()
+            if report.get("status") in ("completed", "failed"):
+                break
+            time.sleep(5)
+        if report.get("status") == "failed":
+            logger.error(f"AI billing report {report_id} failed")
+            return []
+        if not report:
+            return []
+
+        dict_save_to_json_file(
+            report,
+            f"{self.organization_slug}_ai_billing_report",
+            save_to_json=save_to_json,
+        )
+
+        metrics = []
+
+        def category_for(name):
+            key = name.lower().replace("_", " ")
+            if "credit" in key:
+                return "ai_credits"
+            if "gross" in key:
+                return "gross_cost"
+            if "discount" in key:
+                return "discount_cost"
+            if "net" in key:
+                return "net_cost"
+            if "applied cost" in key:
+                return "unit_cost"
+            if "input" in key and "token" in key:
+                return "input_tokens"
+            if "output" in key and "token" in key:
+                return "output_tokens"
+            if key == "input":
+                return "input_tokens"
+            if key == "output":
+                return "output_tokens"
+            return None
+
+        download_urls = report.get("download_urls", []) if isinstance(report, dict) else []
+        for download_url in download_urls:
+            response = requests.get(download_url, headers={"Accept": "text/csv, application/json"})
+            response.raise_for_status()
+            rows = list(csv.DictReader(io.StringIO(response.text)))
+            for row_number, row in enumerate(rows):
+                def clean_name(name):
+                    return name.lstrip("\ufeffï»¿").strip('"') if name else name
+
+                normalized_row = {
+                    clean_name(name): value
+                    for name, value in row.items()
+                }
+                row_doc = {
+                    **normalized_row,
+                    "record_type": "csv_row",
+                    "organization_slug": self.organization_slug,
+                    "report_id": report_id,
+                    "day": normalized_row.get("date") or current_time()[:10],
+                    "last_updated_at": current_time(),
+                    "user_login": normalized_row.get("username", "unknown"),
+                    "row_number": row_number,
+                }
+                try:
+                    row_doc["quantity_value"] = float(
+                        str(normalized_row.get("quantity", "0")).replace(",", "")
+                    )
+                except ValueError:
+                    row_doc["quantity_value"] = 0.0
+                row_doc["unique_hash"] = generate_unique_hash(
+                    row_doc, ["organization_slug", "report_id", "row_number"]
+                )
+                metrics.append(row_doc)
+                for name, raw_value in row.items():
+                    name = clean_name(name)
+                    category = category_for(name)
+                    if not category and name.lower() in ("quantity", "aic_quantity"):
+                        if "credit" in row.get("unit_type", "").lower():
+                            category = "ai_credits"
+                    if not category or raw_value in (None, ""):
+                        continue
+                    try:
+                        numeric_value = float(str(raw_value).replace(",", "").replace("$", ""))
+                    except ValueError:
+                        continue
+                    metrics.append({
+                        "metric_name": name,
+                        "category": category,
+                        "value": numeric_value,
+                        "day": normalized_row.get("date"),
+                        "unit": "count" if category == "ai_credits" or "token" in name.lower() else "currency",
+                        "user_login": next(
+                            (row.get(field) for field in ("user_login", "user", "username", "actor", "login") if row.get(field)),
+                            "unknown",
+                        ),
+                        "row_number": row_number,
+                    })
+
+        if metrics:
+            report_day = report.get("end_date") or current_time()[:10]
+            for metric in metrics:
+                metric.update({
+                    "organization_slug": self.organization_slug,
+                    "report_id": report_id,
+                    "day": metric.get("day") or report_day,
+                    "last_updated_at": current_time(),
+                })
+                metric["unique_hash"] = generate_unique_hash(
+                    metric, ["organization_slug", "report_id", "metric_name", "row_number"]
+                )
+            return metrics
+
+        def walk(value, path=""):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    walk(child, f"{path}.{key}".strip("."))
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    walk(child, f"{path}.{index}".strip("."))
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                key = path.rsplit(".", 1)[-1].lower()
+                category = None
+                if "credit" in key:
+                    category = "ai_credits"
+                elif "gross" in key or "cost" in key or "amount" in key:
+                    category = "gross_cost"
+                elif "input" in key and "token" in key:
+                    category = "input_tokens"
+                elif "output" in key and "token" in key:
+                    category = "output_tokens"
+                if category:
+                    metrics.append({
+                        "metric_name": path,
+                        "category": category,
+                        "value": float(value),
+                        "unit": "count" if "token" in key or "credit" in key else "currency",
+                    })
+
+        walk(report)
+        day = current_time()[:10]
+        for metric in metrics:
+            metric.update({
+                "organization_slug": self.organization_slug,
+                "report_id": report_id,
+                "day": day,
+                "last_updated_at": current_time(),
+            })
+            metric["unique_hash"] = generate_unique_hash(
+                metric, ["organization_slug", "report_id", "metric_name"]
+            )
+        return metrics
 
     def _add_fullpath_slug(self, teams):
         id_to_team = {team["id"]: team for team in teams}
@@ -1363,6 +1512,97 @@ class ElasticsearchManager:
             self.es.index(index=index_name, id=doc_id, document=data)
             logger.info(f"[created] to [{index_name}]: {data}")
 
+    def backfill_user_metric_teams(self, organization_slug, user_team_lookup):
+        response = self.es.search(
+            index=Indexes.index_user_metrics,
+            query={
+                "bool": {
+                    "filter": [{"term": {"organization_slug": organization_slug}}],
+                    "must_not": [{"exists": {"field": "team_slug"}}],
+                }
+            },
+            size=10000,
+            source=["user_login"],
+        )
+        updated = 0
+        for hit in response["hits"]["hits"]:
+            user_login = hit["_source"].get("user_login")
+            self.es.update(
+                index=Indexes.index_user_metrics,
+                id=hit["_id"],
+                doc={"team_slug": user_team_lookup.get(user_login, "no-team")},
+            )
+            updated += 1
+        if updated:
+            logger.info(f"Backfilled team_slug for {updated} user metrics documents")
+
+    def backfill_adoption_teams(self, organization_slug, user_team_lookup):
+        response = self.es.search(
+            index=Indexes.index_user_adoption,
+            query={
+                "bool": {
+                    "filter": [{"term": {"organization_slug": organization_slug}}],
+                    "must_not": [{"exists": {"field": "team_slug"}}],
+                }
+            },
+            size=10000,
+            source=["user_login"],
+        )
+        updated = 0
+        for hit in response["hits"]["hits"]:
+            user_login = hit["_source"].get("user_login")
+            self.es.update(
+                index=Indexes.index_user_adoption,
+                id=hit["_id"],
+                doc={"team_slug": user_team_lookup.get(user_login, "no-team")},
+            )
+            updated += 1
+        if updated:
+            logger.info(f"Backfilled team_slug for {updated} adoption documents")
+
+    def replace_adoption_records(self, organization_slug, adoption_entries):
+        self.es.delete_by_query(
+            index=Indexes.index_user_adoption,
+            query={"term": {"organization_slug": organization_slug}},
+            conflicts="proceed",
+            refresh=True,
+        )
+        for adoption_entry in adoption_entries:
+            self.write_to_es(Indexes.index_user_adoption, adoption_entry)
+
+    def replace_billing_records(self, organization_slug, billing_entries):
+        self.es.delete_by_query(
+            index=Indexes.index_ai_billing,
+            query={"term": {"organization_slug": organization_slug}},
+            conflicts="proceed",
+            refresh=True,
+        )
+        for entry in billing_entries:
+            self.write_to_es(Indexes.index_ai_billing, entry)
+
+    def clear_report_usage(self, organization_slug):
+        for index_name in (
+            Indexes.index_name_total,
+            Indexes.index_name_breakdown_chat,
+        ):
+            self.es.delete_by_query(
+                index=index_name,
+                query={"bool": {"filter": [
+                    {"term": {"organization_slug": organization_slug}},
+                    {"term": {"report_source.keyword": "user-28-day"}},
+                ]}},
+                conflicts="proceed",
+                refresh=True,
+            )
+
+    def get_user_metrics_for_organization(self, organization_slug):
+        response = self.es.search(
+            index=Indexes.index_user_metrics,
+            query={"term": {"organization_slug": organization_slug}},
+            size=10000,
+        )
+        return [hit["_source"] for hit in response["hits"]["hits"]]
+
 
 def main(organization_slug):
     logger.info(
@@ -1405,6 +1645,15 @@ def main(organization_slug):
         f"Processing Copilot seat assignments for {slug_type}: {organization_slug}"
     )
     data_seat_assignments = github_org_manager.get_seat_assignments()
+    github_org_manager.user_team_lookup = github_org_manager.build_user_team_lookup(
+        data_seat_assignments
+    )
+    es_manager.backfill_user_metric_teams(
+        organization_slug, github_org_manager.user_team_lookup
+    )
+    es_manager.backfill_adoption_teams(
+        organization_slug, github_org_manager.user_team_lookup
+    )
     if not data_seat_assignments:
         logger.warning(
             f"No Copilot seat assignments found for {slug_type}: {organization_slug}"
@@ -1422,6 +1671,7 @@ def main(organization_slug):
     logger.info(
         f"Processing Copilot user metrics for {slug_type}: {organization_slug}"
     )
+    user_metrics_data = []
     try:
         logger.info("Calling get_copilot_user_metrics()...")
         user_metrics_data = github_org_manager.get_copilot_user_metrics()
@@ -1435,18 +1685,23 @@ def main(organization_slug):
             logger.info(f"Writing {len(user_metrics_data)} user metrics to Elasticsearch...")
             for user_metric in user_metrics_data:
                 es_manager.write_to_es(Indexes.index_user_metrics, user_metric)
-            adoption_entries = build_user_adoption_leaderboard(
-                user_metrics_data, organization_slug, slug_type
-            )
-            if adoption_entries:
-                logger.info(
-                    f"Writing {len(adoption_entries)} adoption leaderboard entries to Elasticsearch..."
-                )
-                for adoption_entry in adoption_entries:
-                    es_manager.write_to_es(
-                        Indexes.index_user_adoption, adoption_entry
-                    )
             logger.info(f"Successfully processed {len(user_metrics_data)} user metrics records for {slug_type}: {organization_slug}")
+
+        all_user_metrics_data = es_manager.get_user_metrics_for_organization(
+            organization_slug
+        )
+        adoption_entries = build_user_adoption_leaderboard(
+            all_user_metrics_data, organization_slug, slug_type
+        )
+        if adoption_entries:
+            for adoption_entry in adoption_entries:
+                adoption_entry["team_slug"] = github_org_manager.user_team_lookup.get(
+                    adoption_entry.get("user_login"), "no-team"
+                )
+            logger.info(
+                f"Writing {len(adoption_entries)} adoption leaderboard entries to Elasticsearch..."
+            )
+            es_manager.replace_adoption_records(organization_slug, adoption_entries)
     except Exception as e:
         logger.error(f"Failed to process user metrics for {slug_type} {organization_slug}: {e}")
         import traceback
@@ -1474,7 +1729,23 @@ def main(organization_slug):
         logger.error(f"Full traceback: {traceback.format_exc()}")
 
     # Process usage data
-    copilot_usage_datas = github_org_manager.get_copilot_usages(team_slug="all")
+    try:
+        billing_entries = github_org_manager.get_ai_billing_report()
+        if billing_entries:
+            es_manager.replace_billing_records(organization_slug, billing_entries)
+            logger.info(f"Stored {len(billing_entries)} AI billing metrics")
+        else:
+            logger.warning("AI billing report returned no recognized numeric metrics")
+    except Exception as e:
+        logger.error(f"Failed to process AI billing report: {e}")
+
+    # Process usage data
+    if user_metrics_data:
+        es_manager.clear_report_usage(organization_slug)
+    copilot_usage_datas = {
+        team: {"position_in_tree": "leaf_team", "copilot_usage_data": data}
+        for team, data in convert_user_report_to_usage(user_metrics_data).items()
+    }
     logger.info(f"Processing Copilot usage data for {slug_type}: {organization_slug}")
     for team_slug, data_with_position in copilot_usage_datas.items():
         logger.info(f"Processing Copilot usage data for team: {team_slug}")
@@ -1527,7 +1798,7 @@ if __name__ == "__main__":
     import os
     
     # Get execution interval from environment (default: 1 hour)
-    execution_interval_hours = int(os.getenv("EXECUTION_INTERVAL_HOURS", "1"))
+    execution_interval_hours = int(os.getenv("EXECUTION_INTERVAL_HOURS", "4"))
     execution_interval_seconds = execution_interval_hours * 3600
     
     logger.info(f"Starting Copilot metrics collector with {execution_interval_hours}h interval")

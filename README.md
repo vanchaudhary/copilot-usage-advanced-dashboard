@@ -37,8 +37,8 @@
     - [4. Editors](#4-Editors)
     - [5. Copilot Chat](#5-Copilot-Chat)
     - [6. Seat Analysis](#6-Seat-Analysis)
-    - [7. Breakdown Heatmap](#7-Breakdown-Heatmap)
-    - [8. User Metrics Analytics](#8-User-Metrics-Analytics)
+    - [7. User Metrics Analytics](#7-User-Metrics-Analytics)
+    - [8. AI Tokens Billing](#8-AI-Tokens-Billing)
   - [Copilot Usage Advanced Dashboard Original](#Copilot-Usage-Advanced-Dashboard-Original)
     - [1. Copilot Seat Info & Top Languages](#1-Copilot-Seat-Info--Top-Languages)
     - [2. Copilot Usage Total Insight](#2-Copilot-Usage-Total-Insight)
@@ -80,7 +80,7 @@ ORGANIZATION_SLUGS=your-org-name
 
 3. **Start the dashboard**
 ```bash
-docker-compose up -d
+docker compose up -d --force-recreate
 ```
 
 4. **Access Grafana**
@@ -90,11 +90,12 @@ docker-compose up -d
 - ✨ Dashboard loads automatically - no manual import needed!
 
 ### What Happens Automatically
-✅ Elasticsearch starts and creates 7 indexes  
+✅ Elasticsearch starts and the updater creates the required indexes
 ✅ Grafana starts with pre-configured datasources  
 ✅ Dashboard provisions automatically from `/grafana-provisioning/dashboards/`  
-✅ `cpuad-updater` fetches data from 5 GitHub APIs every hour  
+✅ `cpuad-updater` fetches data from GitHub APIs immediately at startup and every 4 hours
 ✅ User metrics populate in "User Metrics" row (9 panels)  
+✅ Enterprise AI credit billing reports populate the "AI Tokens Billing" row when available
 ✅ System self-heals if any container crashes  
 
 ### Environment Variables
@@ -104,7 +105,9 @@ docker-compose up -d
 | `GITHUB_PAT` | ✅ Yes | GitHub Personal Access Token | - |
 | `ORGANIZATION_SLUGS` | ✅ Yes | Comma-separated org slugs | - |
 | `ELASTICSEARCH_URL` | No | Elasticsearch endpoint | `http://elasticsearch:9200` |
-| `EXECUTION_INTERVAL_HOURS` | No | Data fetch frequency (hours) | `1` |
+| `EXECUTION_INTERVAL_HOURS` | No | Data fetch frequency (hours) | `4` |
+| `GITHUB_BILLING_START_DATE` | No | Billing report start date (`YYYY-MM-DD`); set with end date | Previous month start |
+| `GITHUB_BILLING_END_DATE` | No | Billing report end date (`YYYY-MM-DD`); set with start date | Previous month end |
 | `INDEX_USER_METRICS` | No | User metrics index name | `copilot_user_metrics` |
 | `INDEX_USER_ADOPTION` | No | Adoption leaderboard index | `copilot_user_adoption` |
 
@@ -115,10 +118,10 @@ docker-compose up -d
 [Copilot Usage Advanced Dashboard](https://github.com/satomic/copilot-usage-advanced-dashboard) is a single data panel display that almost fully utilizes data from Copilot APIs, The APIs used are:
 
 - [List teams of an organization](https://docs.github.com/en/enterprise-cloud@latest/rest/teams/teams?apiVersion=2022-11-28#list-teams)
-- [Get a summary of Copilot metrics for a team](https://docs.github.com/en/enterprise-cloud@latest/rest/copilot/copilot-metrics?apiVersion=2022-11-28#get-copilot-metrics-for-a-team)
+- [Get Copilot user usage metrics (latest 28-day report)](https://docs.github.com/en/rest/copilot/copilot-usage-metrics?apiVersion=2026-03-10#get-copilot-users-usage-metrics)
 - [Get Copilot seat information and settings for an organization](https://docs.github.com/en/enterprise-cloud@latest/rest/copilot/copilot-user-management?apiVersion=2022-11-28#get-copilot-seat-information-and-settings-for-an-organization)
 - [List all Copilot seat assignments for an organization](https://docs.github.com/en/enterprise-cloud@latest/rest/copilot/copilot-user-management?apiVersion=2022-11-28#list-all-copilot-seat-assignments-for-an-organization)
-- [**NEW in v1.8** - Get Copilot User Metrics (28-day rolling window)](https://docs.github.com/en/enterprise-cloud@latest/rest/copilot/copilot-usage?apiVersion=2022-11-28#get-a-summary-of-copilot-user-metrics)
+- [Get enterprise billing usage reports](https://docs.github.com/en/rest/enterprise-admin/billing?apiVersion=2026-03-10)
 
 representing Copilot usage in multi organizations & teams from different dimensions. The features are summarized as follows:
 - Data is persisted in Elasticsearch and visualized in Grafana, **not just the past 28 days**. So you can freely choose the time period you want to visualize, such as the past year or a specific month.
@@ -246,22 +249,9 @@ The choice of variables is dynamically associated with the data display
 
 ![](image/image_vNpkYpc-xW.png)
 
-### 7. Breakdown Heatmap
+### 7. User Metrics Analytics
 
-> Based on the breakdown data in [Get a summary of Copilot usage for a team](https://docs.github.com/en/enterprise-cloud@latest/rest/copilot/copilot-usage?apiVersion=2022-11-28#get-a-summary-of-copilot-usage-for-a-team), we analyze the data from two dimensions: Languages ​​and Editors. We can clearly see what combination of Languages ​​and Editors can achieve the best Copilot usage effect.
-
-- Active Users Count (Group by Language) = `active_users.groupby(language)`
-- Accept Rate by Count (%) = `sum(acceptances_count).groupby(language) / sum(suggestions_count).groupby(language)`
-- Accept Rate by Lines (%) = `sum(lines_accepted).groupby(language) / sum(lines_suggested).groupby(language)`
-- Active Users Count (Group by Editor) = `active_users.groupby(editor)`
-- Accept Rate by Count (%) = `sum(acceptances_count).groupby(editor) / sum(suggestions_count).groupby(editor)`
-- Accept Rate by Lines (%) = `sum(lines_accepted).groupby(editor) / sum(lines_suggested).groupby(editor)`
-
-![](image/image_i7-wXGj-UA.png)
-
-### 8. User Metrics Analytics
-
-> **NEW in v1.8**: Complete user-level analytics powered by GitHub Copilot User Metrics API. Track individual user adoption, engagement patterns, and feature utilization with automated hourly updates.
+> Complete user-level analytics powered by the GitHub Copilot 28-day user metrics report. Track adoption, engagement, and feature utilization with updates every four hours.
 
 Based on the data from [Get Copilot User Metrics](https://docs.github.com/en/enterprise-cloud@latest/rest/copilot/copilot-usage?apiVersion=2022-11-28#get-a-summary-of-copilot-user-metrics), this module provides comprehensive per-user analytics including:
 
@@ -317,7 +307,7 @@ Based on the data from [Get Copilot User Metrics](https://docs.github.com/en/ent
   - 🔵 Blue (95-100%): Power user - Copilot champion candidate
 
 **Automated Data Collection:**
-- Runs every hour (configurable via `EXECUTION_INTERVAL_HOURS`)
+- Runs immediately at startup and every four hours (configurable via `EXECUTION_INTERVAL_HOURS`)
 - Fetches 28-day rolling window data from GitHub API
 - Calculates adoption scores automatically
 - Stores in 2 Elasticsearch indexes: `copilot_user_metrics` (raw data) and `copilot_user_adoption` (leaderboard scores)
@@ -331,6 +321,23 @@ Based on the data from [Get Copilot User Metrics](https://docs.github.com/en/ent
 - Monitor Chat and Agent feature adoption rates
 - Correlate active days with productivity metrics
 - Generate executive reports on Copilot ROI
+
+### 8. AI Tokens Billing
+
+For enterprise slugs (`standalone:YOUR_ENTERPRISE_SLUG`), the updater creates an `ai_credit` billing usage report using GitHub's `2026-03-10` API, obtains its report ID, polls for completion, and downloads the CSV. If a report already exists (HTTP 409), it reuses a matching export. The previous calendar month is requested by default; set both `GITHUB_BILLING_START_DATE` and `GITHUB_BILLING_END_DATE` to choose another period. The billing row uses the `copilot_ai_billing` Elasticsearch index and follows Grafana's Organization and time-range filters. Report generation or missing CSV rows can leave the panels empty until a completed export is available.
+
+| Panel | Data shown |
+|-------|------------|
+| AI Credits | Sum of AI credits consumed from the CSV quantity fields |
+| Gross Cost | Sum of `gross_amount` before discounts |
+| Input Tokens | Sum of the CSV `input` values |
+| Output Tokens | Sum of the CSV `output` values |
+| AI Credits Over Time | AI credits by each CSV row's `date` |
+| Top Users | Highest AI-credit usage by CSV `username` |
+| By Model | AI-credit usage by CSV `model` |
+| AI Billing CSV Details | Raw billing rows, with `date` and `username` first, followed by the remaining CSV columns |
+
+Token counts, AI credits, and monetary cost are separate measures. The CSV details table exposes the original report fields for reconciliation; it is not a second billing total.
 
 
 

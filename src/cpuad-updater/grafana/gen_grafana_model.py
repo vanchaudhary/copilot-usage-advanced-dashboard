@@ -15,6 +15,7 @@ data_source_names = [
     "elasticsearch-user-metrics",
     "elasticsearch-user-metrics-summary",
     "elasticsearch-user-metrics-top-by-day",
+    "elasticsearch-ai-billing",
 ]
 
 grafana_folder = "grafana"

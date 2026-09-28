@@ -328,6 +328,10 @@ def add_grafana_data_sources(grafana_token, max_retries=3, retry_interval=5):
             "name": "elasticsearch-user-adoption",
             "index": "copilot_user_adoption",
         },
+        {
+            "name": "elasticsearch-ai-billing",
+            "index": os.getenv("INDEX_AI_BILLING", "copilot_ai_billing"),
+        },
     ]
 
     # Template for the payload
@@ -418,6 +422,7 @@ def generate_grafana_model(grafana_token):
         "elasticsearch-user-metrics-top-by-day",
         "elasticsearch-user-metrics-summary",
         "elasticsearch-user-adoption",
+        "elasticsearch-ai-billing",
     ]
 
 

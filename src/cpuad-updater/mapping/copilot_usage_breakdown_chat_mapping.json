@@ -43,6 +43,12 @@
       "position_in_tree" : {
         "type" : "keyword"
       },
+      "report_source" : {
+        "type" : "text",
+        "fields" : {
+          "keyword" : { "type" : "keyword", "ignore_above" : 256 }
+        }
+      },
       "unique_hash" : {
         "type" : "keyword"
       }

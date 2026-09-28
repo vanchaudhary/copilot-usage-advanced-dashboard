@@ -46,6 +46,9 @@
       "position_in_tree" : {
         "type" : "keyword"
       },
+      "report_dimension" : {
+        "type" : "keyword"
+      },
       "unique_hash" : {
         "type" : "keyword"
       }

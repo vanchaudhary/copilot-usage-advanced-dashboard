@@ -1,0 +1,19 @@
+{
+  "mappings": {
+    "properties": {
+      "organization_slug": {"type": "keyword"},
+      "report_id": {"type": "keyword"},
+      "metric_name": {"type": "keyword"},
+      "user_login": {"type": "keyword"},
+      "category": {"type": "keyword"},
+      "value": {"type": "double"},
+      "unit": {"type": "keyword"},
+      "day": {"type": "date"},
+      "last_updated_at": {"type": "text"},
+      "unique_hash": {"type": "keyword"}
+    }
+  },
+  "settings": {
+    "index": {"number_of_shards": 1, "number_of_replicas": 0}
+  }
+}

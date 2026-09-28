@@ -22,6 +22,9 @@
       "organization_slug": {
         "type": "keyword"
       },
+      "team_slug": {
+        "type": "keyword"
+      },
       "slug_type": {
         "type": "keyword"
       },

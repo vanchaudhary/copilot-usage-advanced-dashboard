@@ -60,6 +60,7 @@ def ensure_dest_index(es: Elasticsearch, index_name: str) -> None:
                     "day": {"type": "date"},
                     "user_login": {"type": "keyword"},
                     "organization_slug": {"type": "keyword"},
+                    "team_slug": {"type": "keyword"},
                     "enterprise_id": {"type": "keyword"},
                     "top_ide": {"type": "keyword"},
                     "top_feature": {"type": "keyword"},
@@ -112,6 +113,7 @@ def build_top_doc(source_doc: dict[str, Any]) -> dict[str, Any] | None:
         "day": day,
         "user_login": user_login,
         "organization_slug": source_doc.get("organization_slug"),
+        "team_slug": source_doc.get("team_slug", "no-team"),
         "enterprise_id": str(source_doc.get("enterprise_id")) if source_doc.get("enterprise_id") is not None else None,
     }
 

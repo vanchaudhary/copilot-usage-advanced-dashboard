@@ -1,6 +1,4 @@
 # GITHUB_PAT=ghp_xxxxxxx docker compose up --build
-version: '3.8'
-
 services:
   elasticsearch:
     build:
@@ -28,7 +26,8 @@ services:
     ports:
       - "8080:80"
     depends_on:
-      - elasticsearch
+      elasticsearch:
+        condition: service_healthy
     volumes:
       - grafana:/var/lib/grafana
       - ./grafana-provisioning/dashboards:/var/lib/grafana/dashboards
@@ -52,9 +51,12 @@ services:
       context: ./src/cpuad-updater/grafana
     container_name: init-grafana
     depends_on:
-      - grafana
-      - elasticsearch
-      - cpuad-updater
+      grafana:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      cpuad-updater:
+        condition: service_started
     environment:
       ELASTICSEARCH_URL: http://elasticsearch:9200
       GRAFANA_URL: http://grafana:80
@@ -69,14 +71,15 @@ services:
       context: ./src/cpuad-updater
     container_name: cpuad-updater
     depends_on:
-      - elasticsearch
+      elasticsearch:
+        condition: service_healthy
     environment:
       GITHUB_PAT: ${GITHUB_PAT}
       ORGANIZATION_SLUGS: ${ORGANIZATION_SLUGS:-standalone:octodemo-copilot-standalone}
       ELASTICSEARCH_URL: http://elasticsearch:9200
       INDEX_USER_METRICS: copilot_user_metrics
       INDEX_USER_ADOPTION: copilot_user_adoption
-      EXECUTION_INTERVAL_HOURS: ${EXECUTION_INTERVAL_HOURS:-1}
+      EXECUTION_INTERVAL_HOURS: ${EXECUTION_INTERVAL_HOURS:-4}
       # Add other environment variables as needed
     restart: unless-stopped
     healthcheck:
